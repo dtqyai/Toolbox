@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(require.resolve('../app.js'), 'utf8');
+const sources = ['data.js', 'price-view.js', 'app.js']
+  .map(file => fs.readFileSync(require.resolve('../' + file), 'utf8'));
 function runtime(storage = new Map(), locks) {
   const listeners = {};
   const elements = new Map();
@@ -32,7 +33,7 @@ function runtime(storage = new Map(), locks) {
     setTimeout: fn => { queueMicrotask(fn); return 1; }, clearTimeout() {},
     setInterval: () => 1, clearInterval() {},
   });
-  vm.runInContext(source, context);
+  for (const source of sources) vm.runInContext(source, context);
   return { context, document, listeners, run: code => vm.runInContext(code, context) };
 }
 function serialLocks() {

@@ -25,7 +25,7 @@ python3 -m http.server 8000
 
 浏览器打开 [本地工具箱](http://127.0.0.1:8000/)。关闭终端中的服务后，再次运行同一条命令即可继续使用。
 
-也可以将 `index.html`、`styles.css`、`app.js` 和 `favicon.png` 放到静态网站托管服务上，无需后端。
+也可以将 `index.html`、`styles.css`、`data.js`、`price-view.js`、`app.js` 和 `favicon.png` 放到静态网站托管服务上，无需后端。
 
 ### 键盘操作
 
@@ -43,23 +43,25 @@ python3 -m http.server 8000
 
 ## 开发与验证
 
-页面结构在 [index.html](index.html)，样式在 [styles.css](styles.css)，四项工具的逻辑在 [app.js](app.js)。Boss 日程由 `app.js` 中的 `WORLD` 和 `NORMAL` 配置维护。
+页面结构在 [index.html](index.html)，样式在 [styles.css](styles.css)。[data.js](data.js) 负责数值校验、比价计算和存储编解码；[price-view.js](price-view.js) 根据数据生成比价模板，不读写存储；[app.js](app.js) 负责交互、同步、草稿和计时。三个脚本按此顺序加载，不需要构建。Boss 日程由 `app.js` 中的 `WORLD` 和 `NORMAL` 配置维护。
+
+比价提交状态按组／商品标识保存，重绘时必须恢复；异步保存使用提交时的完整快照，期间的新输入继续作为草稿保留。合并其他标签页的数据后，画面也必须同步更新。
 
 测试使用 Node.js 内置测试运行器，CI 使用 Node.js 22。在项目目录运行：
 
 ```bash
-node --check app.js
-node --test tests/*.test.js
+npm test
 ```
 
-[tests/app.test.js](tests/app.test.js) 检查换算、输入校验、计时边界等基础逻辑；[tests/runtime.test.js](tests/runtime.test.js) 覆盖跨标签计数、表单草稿恢复、保存失败回滚和编辑冲突。运行时测试使用 DOM 与存储替身；[浏览器测试](tests/browser/ui.test.cjs) 则在真实 Chromium 中检查编辑、焦点、错误反馈、跨标签同步和响应式布局。
+[tests/app.test.js](tests/app.test.js) 检查换算、输入校验、计时边界等基础逻辑；[tests/runtime.test.js](tests/runtime.test.js) 覆盖跨标签计数、表单草稿恢复、保存失败回滚和编辑冲突。运行时测试使用 DOM 与存储替身；[浏览器测试](tests/browser/ui.test.cjs) 则在真实 Chromium 和 WebKit 中检查编辑、焦点、错误反馈、跨标签同步和响应式布局，也覆盖延迟写锁、重绘期间重复提交、无 Web Locks 的双标签操作，以及时钟回拨。
 
-运行浏览器测试前，需要安装开发依赖和 Chromium，网页本身仍无需构建：
+运行浏览器测试前，需要安装开发依赖和测试浏览器，网页本身仍无需构建：
 
 ```bash
 npm ci
-npx playwright install chromium
+npx playwright install chromium webkit
 npm run test:browser
+TEST_BROWSER=webkit npm run test:browser
 ```
 
 浏览器测试覆盖 320、375、640、768 和 1440px 宽度。失败截图保存在 `test-results/`。如需使用已安装的 Chrome，可通过 `CHROME_EXECUTABLE_PATH` 指定可执行文件路径。
@@ -72,4 +74,4 @@ npm run test:browser
 npm run test:deploy
 ```
 
-它会验证部署预检、网站文件内容，以及依赖、配置和测试文件的 404 响应。部署由 `wrangler.jsonc` 配置，`.assetsignore` 仅允许四个网站文件；新增图片、脚本等公开资源时，需要同步更新白名单和部署测试。
+它会验证部署预检、网站文件内容，以及依赖、配置和测试文件的 404 响应。部署由 `wrangler.jsonc` 配置，`.assetsignore` 仅允许上述六个网站文件；新增图片、脚本等公开资源时，需要同步更新白名单和部署测试。

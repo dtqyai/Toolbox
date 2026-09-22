@@ -1,6 +1,6 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { chromium } = require('playwright');
+const { chromium, webkit } = require('playwright');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,7 +11,7 @@ const fixture = { v: 1, revision: 1, groups: [{ id: 'g', name: '牛奶对比', i
 ] }] };
 before(async () => {
   const root = path.resolve(__dirname, '../..');
-  const files = new Set(['/index.html', '/app.js', '/styles.css', '/favicon.png']);
+  const files = new Set(['/index.html', '/app.js', '/data.js', '/price-view.js', '/styles.css', '/favicon.png']);
   server = http.createServer((req, res) => {
     const file = new URL(req.url, 'http://localhost').pathname.replace(/^\/$/, '/index.html');
     if (!files.has(file)) { res.writeHead(404); res.end(); return; }
@@ -20,11 +20,13 @@ before(async () => {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${server.address().port}`;
-  browser = await chromium.launch(process.env.CHROME_EXECUTABLE_PATH ? { executablePath: process.env.CHROME_EXECUTABLE_PATH } : {});
+  const engine = process.env.TEST_BROWSER === 'webkit' ? webkit : chromium;
+  browser = await engine.launch(engine === chromium && process.env.CHROME_EXECUTABLE_PATH ? { executablePath: process.env.CHROME_EXECUTABLE_PATH } : {});
 });
 after(async () => { if (browser) await browser.close(); if (server) await new Promise(r => server.close(r)); });
-async function withPage(run, width = 375) {
-  const context = await browser.newContext({ viewport: { width, height: 900 } });
+async function withPage(run, width = 375, { noLocks = false } = {}) {
+  const context = await browser.newContext({ viewport: { width, height: 900 }, timezoneId: 'Asia/Shanghai' });
+  if (noLocks) await context.addInitScript(() => Object.defineProperty(navigator, 'locks', { value: undefined }));
   const errors = [];
   context.on('page', page => page.on('pageerror', e => errors.push(e.message)));
   try {
@@ -239,3 +241,226 @@ test('overflowing price calculations are rejected and can be corrected', () => w
   await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 3);
   assert.doesNotMatch(await page.locator('#price-list').innerText(), /Infinity|NaN/);
 }));
+
+// Hold the real browser lock until the test releases it. This makes the
+// submission/redraw ordering deterministic without replacing app callbacks.
+async function holdPriceLock(page) {
+  await page.evaluate(() => new Promise(entered => {
+    window.heldPriceLock = navigator.locks.request('toolbox-price-groups-write', () => new Promise(release => {
+      window.releasePriceLock = release;
+      entered();
+    }));
+  }));
+}
+async function releasePriceLock(page) {
+  await page.evaluate(async () => { window.releasePriceLock(); await window.heldPriceLock; });
+}
+async function fillItem(form, name, price = '10') {
+  await form.locator('[data-field=name]').fill(name);
+  await form.locator('[data-field=unitWeight]').fill('100');
+  await form.locator('[data-field=totalPrice]').fill(price);
+}
+
+for (const remoteChange of ['add', 'change', 'delete']) {
+  test(`saving an edit renders a queued remote group ${remoteChange}`, () => withPage(async (page, context) => {
+    await page.addInitScript(() => {
+      window.queuedStorageEvents = [];
+      window.delayStorage = event => {
+        if (!window.delayStorageEvents) return;
+        event.stopImmediatePropagation();
+        window.queuedStorageEvents.push(event);
+      };
+      window.addEventListener('storage', window.delayStorage);
+    });
+    await page.reload();
+    await newGroup(page, '远端旧组');
+    const other = await context.newPage(); await other.goto(url + '/#price');
+    await page.locator('[data-action=edit]').first().click();
+    await page.locator('.item-edit-form [data-field=name]').fill('本页编辑');
+    // Delay delivery, not persistence, as with a queued cross-tab storage event.
+    await page.evaluate(() => { window.delayStorageEvents = true; });
+    await other.evaluate(change => {
+      const state = JSON.parse(localStorage.getItem('toolbox_price_groups'));
+      if (change === 'add') state.groups.push({ id: 'remote-new', name: '远端新组', items: [] });
+      if (change === 'change') state.groups[1].items.push({ id: 'remote-item', name: '远端商品', unitWeight: 100, packSize: 1, packCount: 1, totalPrice: 10 });
+      if (change === 'delete') state.groups.splice(1, 1);
+      state.revision += 1;
+      localStorage.setItem('toolbox_price_groups', JSON.stringify(state));
+    }, remoteChange);
+    await page.waitForFunction(() => window.queuedStorageEvents.length > 0);
+    await page.locator('.item-edit-form button[type=submit]').click();
+    await page.waitForFunction(() => !document.querySelector('.item-edit-form'));
+    await page.evaluate(() => {
+      window.delayStorageEvents = false;
+      for (const event of window.queuedStorageEvents) window.dispatchEvent(new StorageEvent('storage', { key: event.key }));
+    });
+    const expected = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).groups.map(g => g.name));
+    assert.deepEqual(await page.locator('.group-name').allTextContents(), expected);
+    const expectedItems = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).groups.flatMap(g => g.items.map(i => i.name)));
+    const visibleItems = await page.locator('.item-name').evaluateAll(elements => elements.map(el => el.firstChild.textContent));
+    assert.deepEqual(visibleItems, expectedItems);
+    assert.equal(await storedName(page), '本页编辑');
+  }));
+}
+
+test('pending add preserves the next draft after a synchronization redraw', () => withPage(async page => {
+  const form = page.locator('.group-add-item-form').first();
+  await fillItem(form, '提交商品');
+  await holdPriceLock(page);
+  await form.locator('button').click();
+  await fillItem(form, '下一件草稿', '20');
+  await page.evaluate(() => renderPriceList());
+  await releasePriceLock(page);
+  await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 3);
+  assert.equal(await form.locator('[data-field=name]').inputValue(), '下一件草稿');
+  assert.equal(await form.locator('[data-field=totalPrice]').inputValue(), '20');
+  const item = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).groups[0].items.at(-1));
+  assert.equal(item.name, '提交商品'); assert.equal(item.totalPrice, 10);
+}));
+
+test('pending new-group submission preserves the next group name', () => withPage(async page => {
+  await page.locator('#new-group-name').fill('提交组');
+  await holdPriceLock(page);
+  await page.locator('#create-group-form button').click();
+  await page.locator('#new-group-name').fill('下一组草稿');
+  await releasePriceLock(page);
+  await page.waitForFunction(() => document.querySelectorAll('.group-card').length === 2);
+  assert.equal(await page.locator('#new-group-name').inputValue(), '下一组草稿');
+  assert.deepEqual(await page.locator('.group-name').allTextContents(), [fixture.groups[0].name, '提交组']);
+}));
+
+test('pending edit saves one snapshot and retains newer draft fields for retry', () => withPage(async page => {
+  await page.locator('[data-action=edit]').first().click();
+  const form = page.locator('.item-edit-form');
+  await fillItem(form, '提交名称', '10');
+  await holdPriceLock(page);
+  await form.locator('button[type=submit]').click();
+  await fillItem(form, '继续编辑', '20');
+  await releasePriceLock(page);
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).revision > 1);
+  const item = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).groups[0].items[0]);
+  assert.equal(item.name, '提交名称'); assert.equal(item.totalPrice, 10);
+  assert.equal(await form.count(), 1);
+  assert.equal(await form.locator('[data-field=name]').inputValue(), '继续编辑');
+  assert.equal(await form.locator('[data-field=totalPrice]').inputValue(), '20');
+  await form.locator('button[type=submit]').click();
+  await page.waitForFunction(() => !document.querySelector('.item-edit-form'));
+  assert.equal(await storedName(page), '继续编辑');
+}));
+
+test('redrawn pending forms stay busy and reject duplicate submissions', () => withPage(async page => {
+  const form = page.locator('.group-add-item-form').first();
+  await fillItem(form, '仅添加一次');
+  await holdPriceLock(page);
+  await form.locator('button').click();
+  await page.evaluate(() => renderPriceList());
+  const busy = await form.getAttribute('aria-busy');
+  const disabled = await form.locator('button').isDisabled();
+  // Even a programmatic/Enter submission must respect the stable identity.
+  await form.evaluate(el => el.requestSubmit());
+  await releasePriceLock(page);
+  await page.waitForFunction(() => !document.querySelector('.group-add-item-form[aria-busy=true]'));
+  assert.equal(busy, 'true'); assert.equal(disabled, true);
+  const names = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).groups[0].items.map(i => i.name));
+  assert.equal(names.filter(name => name === '仅添加一次').length, 1);
+  assert.equal(await form.locator('button').isDisabled(), false);
+  assert.equal(await form.locator('[data-field=name]').inputValue(), '');
+}));
+
+test('no-Web-Locks writes block two active tabs and recover after close', () => withPage(async (page, context) => {
+  assert.equal(await page.evaluate(() => navigator.locks), undefined);
+  const other = await context.newPage(); await other.goto(url + '/#price');
+  const form = page.locator('.group-add-item-form');
+  await fillItem(form, '关闭另一页后保存');
+  await form.locator('button').click();
+  await page.waitForFunction(() => document.querySelector('#price-storage-status').textContent.includes('请关闭'));
+  assert.equal(await page.locator('.item-card').count(), 2);
+  await page.locator('#tab-counter').click(); await page.locator('#btn-plus').click();
+  await page.waitForFunction(() => document.querySelector('#counter-storage-status').textContent.includes('请关闭'));
+  assert.equal(await page.locator('#counter-value').textContent(), '0');
+  // Navigation exercises the real pagehide release rather than deleting keys.
+  await other.goto('about:blank'); await other.close();
+  await page.locator('#btn-plus').click();
+  await page.waitForFunction(() => document.querySelector('#counter-value').textContent === '1');
+  await page.locator('#tab-price').click(); await form.locator('button').click();
+  await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 3);
+  assert.equal(await form.locator('[data-field=name]').inputValue(), '');
+}, 375, { noLocks: true }));
+
+test('boss countdown recomputes after a clock rollback without a false spawn', () => withPage(async page => {
+  await page.clock.install({ time: new Date('2026-09-22T18:01:00+08:00') });
+  await page.reload(); await page.locator('#tab-timer').click();
+  assert.match(await page.locator('#n-spawn').textContent(), /18:45:00/);
+  await page.clock.setSystemTime(new Date('2026-09-22T17:59:00+08:00'));
+  await page.clock.runFor(1000);
+  assert.match(await page.locator('#n-spawn').textContent(), /18:00:00/);
+  assert.equal(await page.locator('#n-m').textContent(), '00');
+  assert.equal(await page.locator('#n-s').textContent(), '59');
+  assert.equal(await page.locator('.boss-card.normal').evaluate(el => el.classList.contains('boss-spawned')), false);
+  await page.clock.runFor(59000);
+  assert.match(await page.locator('#n-spawn').textContent(), /18:45:00/);
+  assert.equal(await page.locator('.boss-card.normal').evaluate(el => el.classList.contains('boss-spawned')), true);
+}));
+
+test('fallback submission retains its identity and draft through a redraw', () => withPage(async page => {
+  const form = page.locator('.group-add-item-form');
+  await fillItem(form, 'fallback提交');
+  const state = await form.evaluate(el => {
+    el.requestSubmit();
+    el.querySelector('[data-field=name]').value = 'fallback下一件';
+    renderPriceList();
+    const replacement = document.querySelector('.group-add-item-form');
+    replacement.requestSubmit();
+    return { busy: replacement.getAttribute('aria-busy'), disabled: replacement.querySelector('button').disabled };
+  });
+  assert.deepEqual(state, { busy: 'true', disabled: true });
+  await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 3 && !document.querySelector('form[aria-busy=true]'));
+  const names = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).groups[0].items.map(i => i.name));
+  assert.equal(names.filter(name => name === 'fallback提交').length, 1);
+  assert.equal(names.includes('fallback下一件'), false);
+  assert.equal(await form.locator('[data-field=name]').inputValue(), 'fallback下一件');
+  await form.locator('button').click();
+  await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 4);
+  assert.equal(await form.locator('[data-field=name]').inputValue(), '');
+}, 375, { noLocks: true }));
+
+test('price templates keep markup-like names as text through save and reload', () => withPage(async page => {
+  const name = '<img src=x onerror="throw 1"> & \'quoted\'';
+  await newGroup(page, name);
+  await page.locator('[data-action=edit]').first().click();
+  await page.locator('.item-edit-form [data-field=name]').fill(name);
+  await page.locator('.item-edit-form button[type=submit]').click();
+  await page.waitForFunction(() => !document.querySelector('.item-edit-form'));
+  await page.reload();
+  assert.equal(await page.locator('.item-name').first().evaluate(el => el.firstChild.textContent), name);
+  assert.equal(await page.locator('.group-name').last().textContent(), name);
+  assert.equal(await page.locator('#price-list img').count(), 0);
+  await page.locator('[data-action=edit]').first().click();
+  assert.equal(await page.locator('.item-edit-form [data-field=name]').inputValue(), name);
+}));
+
+for (const action of ['delete-group', 'delete-item']) {
+  test(`failed ${action} keeps the affected edit draft`, () => withPage(async page => {
+    page.on('dialog', dialog => dialog.accept());
+    await holdPriceLock(page);
+    await page.locator(`[data-action=${action}]`).first().click();
+    await page.locator('[data-action=edit]').first().click();
+    await page.locator('.item-edit-form [data-field=name]').fill('删除失败仍保留');
+    await page.evaluate(() => {
+      window.originalSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(key, value) {
+        if (key === 'toolbox_price_groups') throw new DOMException('quota', 'QuotaExceededError');
+        return window.originalSetItem.call(this, key, value);
+      };
+    });
+    await releasePriceLock(page);
+    await page.waitForFunction(() => document.querySelector('#price-storage-status').textContent.includes('无法保存'));
+    assert.equal(await page.locator('.item-edit-form').count(), 1);
+    assert.equal(await page.locator('.item-edit-form [data-field=name]').inputValue(), '删除失败仍保留');
+    assert.equal(await storedName(page), fixture.groups[0].items[0].name);
+    await page.evaluate(() => { Storage.prototype.setItem = window.originalSetItem; });
+    await page.locator('.item-edit-form button[type=submit]').click();
+    await page.waitForFunction(() => !document.querySelector('.item-edit-form'));
+    assert.equal(await storedName(page), '删除失败仍保留');
+  }));
+}

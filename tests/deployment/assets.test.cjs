@@ -9,7 +9,7 @@ const exec = promisify(execFile);
 const { unstable_startWorker } = require('wrangler');
 const root = path.resolve(__dirname, '../..');
 const cli = path.join(root, 'node_modules/wrangler/wrangler-dist/cli.js');
-const publicFiles = ['index.html', 'app.js', 'styles.css', 'favicon.png'];
+const publicFiles = ['index.html', 'app.js', 'data.js', 'price-view.js', 'styles.css', 'favicon.png'];
 
 test('Workers deployment publishes only website assets', { timeout: 60000 }, async t => {
   // Isolate Wrangler's generated state and seed files that must never be public.
