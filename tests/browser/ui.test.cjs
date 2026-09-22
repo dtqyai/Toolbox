@@ -388,8 +388,13 @@ test('no-Web-Locks writes block two active tabs and recover after close', () => 
 }, 375, { noLocks: true }));
 
 test('boss countdown recomputes after a clock rollback without a false spawn', () => withPage(async page => {
-  await page.clock.install({ time: new Date('2026-09-22T18:01:00+08:00') });
+  // Freeze before initialization so the interval starts on the exact second.
+  // A running mock clock carries navigation/action latency into its phase,
+  // leaving the final tick just before the boundary on slower CI engines.
+  await page.clock.install({ time: new Date('2026-09-22T18:00:00+08:00') });
+  await page.clock.pauseAt(new Date('2026-09-22T18:01:00+08:00'));
   await page.reload(); await page.locator('#tab-timer').click();
+  assert.equal(await page.evaluate(() => new Date().toISOString()), '2026-09-22T10:01:00.000Z');
   assert.match(await page.locator('#n-spawn').textContent(), /18:45:00/);
   await page.clock.setSystemTime(new Date('2026-09-22T17:59:00+08:00'));
   await page.clock.runFor(1000);
