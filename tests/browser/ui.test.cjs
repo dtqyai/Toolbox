@@ -469,3 +469,96 @@ for (const action of ['delete-group', 'delete-item']) {
     assert.equal(await storedName(page), '删除失败仍保留');
   }));
 }
+
+test('a queued item deletion does not remove a newer version of that item', () => withPage(async page => {
+  await holdPriceLock(page);
+  await page.locator('[data-action=delete-item][data-item-id=a]').click();
+  // Persist an update before delivering its storage event, while the delete
+  // is still waiting for the write lock.
+  await page.evaluate(() => {
+    const state = JSON.parse(localStorage.getItem('toolbox_price_groups'));
+    state.groups[0].items[0].name = '删除期间的新版商品';
+    state.revision += 1;
+    localStorage.setItem('toolbox_price_groups', JSON.stringify(state));
+  });
+  await releasePriceLock(page);
+  await page.waitForFunction(() => document.querySelector('#price-storage-status').textContent.includes('变化') ||
+    !document.querySelector('[data-action=delete-item][data-item-id=a]'));
+  assert.equal(await storedName(page), '删除期间的新版商品');
+  assert.equal(await page.locator('.item-card').count(), 2);
+  await page.locator('[data-action=delete-item][data-item-id=a]').click();
+  await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 1);
+  assert.equal(await page.locator('[data-action=edit][data-item-id=b]').count(), 1);
+}));
+
+for (const operation of ['save-edit', 'delete-group']) {
+  test(`${operation} reconciles another active edit before adopting queued storage changes`, () => withPage(async page => {
+    if (operation === 'delete-group') await newGroup(page, '待删除组');
+    await holdPriceLock(page);
+    if (operation === 'save-edit') {
+      await page.locator('[data-action=edit][data-item-id=a]').click();
+      await page.locator('.item-edit-form [data-field=name]').fill('保存第一件');
+      await page.locator('.item-edit-form button[type=submit]').click();
+    } else {
+      page.once('dialog', dialog => dialog.accept());
+      await page.locator('[data-action=delete-group]').last().click();
+    }
+    await page.locator('[data-action=edit][data-item-id=b]').click();
+    await page.locator('.item-edit-form [data-field=name]').fill('第二件的旧草稿');
+    await page.evaluate(() => {
+      const state = JSON.parse(localStorage.getItem('toolbox_price_groups'));
+      state.groups[0].items[1].name = '第二件的远端新版';
+      state.revision += 1;
+      localStorage.setItem('toolbox_price_groups', JSON.stringify(state));
+      window.expectedRevision = state.revision + 1;
+    });
+    await releasePriceLock(page);
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('toolbox_price_groups')).revision === window.expectedRevision);
+    assert.equal(await page.locator('.item-edit-form').count(), 0);
+    assert.match(await page.locator('.item-name').nth(1).textContent(), /第二件的远端新版/);
+  }));
+}
+
+test('an old pending edit conflict preserves a newly opened edit of the latest version', () => withPage(async page => {
+  await page.locator('[data-action=edit][data-item-id=a]').click();
+  await page.locator('.item-edit-form [data-field=name]').fill('过期提交');
+  await holdPriceLock(page);
+  await page.locator('.item-edit-form button[type=submit]').click();
+  await page.evaluate(() => {
+    const state = JSON.parse(localStorage.getItem('toolbox_price_groups'));
+    state.groups[0].items[0].name = '远端新版';
+    state.revision += 1;
+    localStorage.setItem('toolbox_price_groups', JSON.stringify(state));
+    window.dispatchEvent(new StorageEvent('storage', { key: 'toolbox_price_groups' }));
+  });
+  assert.equal(await page.locator('.item-edit-form').count(), 0);
+  await page.locator('[data-action=edit][data-item-id=a]').click();
+  await page.locator('.item-edit-form [data-field=name]').fill('基于新版的新草稿');
+  await releasePriceLock(page);
+  await page.waitForFunction(() => document.querySelector('#price-storage-status').textContent.includes('过期修改未保存'));
+  assert.equal(await page.locator('.item-edit-form').count(), 1);
+  assert.equal(await page.locator('.item-edit-form [data-field=name]').inputValue(), '基于新版的新草稿');
+  assert.equal(await storedName(page), '远端新版');
+  await page.locator('.item-edit-form button[type=submit]').click();
+  await page.waitForFunction(() => !document.querySelector('.item-edit-form'));
+  assert.equal(await storedName(page), '基于新版的新草稿');
+}));
+
+test('a queued add merges data recreated with the same revision and preserves its next draft', () => withPage(async page => {
+  await holdPriceLock(page);
+  await page.locator('#new-group-name').fill('本页新组');
+  await page.locator('#create-group-form button').click();
+  await page.locator('#new-group-name').fill('下一组草稿');
+  await page.evaluate(() => {
+    localStorage.removeItem('toolbox_price_groups');
+    localStorage.setItem('toolbox_price_groups', JSON.stringify({
+      v: 1, revision: 1, groups: [{ id: 'recreated', name: '清空后重建', items: [] }],
+    }));
+  });
+  await releasePriceLock(page);
+  await page.waitForFunction(() => !document.querySelector('#create-group-form[aria-busy=true]'));
+  assert.deepEqual(await page.locator('.group-name').allTextContents(), ['清空后重建', '本页新组']);
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('toolbox_price_groups')));
+  assert.deepEqual(saved.groups.map(g => g.name), ['清空后重建', '本页新组']);
+  assert.equal(await page.locator('#new-group-name').inputValue(), '下一组草稿');
+}));

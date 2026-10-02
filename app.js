@@ -314,9 +314,19 @@ function readStoredGroups() {
 }
 
 function applyStoredGroups(state) {
+  // Every path adopting a persisted snapshot must reconcile the active edit,
+  // including saves/deletes that read it before its storage event arrives.
+  synchronizeEdit(state);
   groups = cloneGroups(state.groups);
   groupsRevision = state.revision;
   persistedGroupsSnapshot = cloneGroups(state.groups);
+}
+
+function storedGroupsChanged(state) {
+  // Clearing storage restarts the revision sequence. Compare against the
+  // last persisted contents, not `groups`, which may contain a pending write.
+  return state.revision !== groupsRevision ||
+    JSON.stringify(state.groups) !== JSON.stringify(persistedGroupsSnapshot);
 }
 
 function runWithPriceStorageLock(lockManager, task, fallback) {
@@ -450,8 +460,7 @@ function itemFormSnapshot(form) {
 async function mutateGroups(mutator) {
   return withPriceStorageLock(async () => {
     const latest = readStoredGroups();
-    if (!latest.storageError && latest.revision !== groupsRevision) {
-      synchronizeEdit(latest);
+    if (!latest.storageError && storedGroupsChanged(latest)) {
       applyStoredGroups(latest);
       renderPriceList();
       showPriceStatus('已同步其他标签页的修改。');
@@ -488,8 +497,7 @@ function flagInputError(el) {
 
 function saveGroups() {
   const latest = readStoredGroups();
-  if (!latest.storageError && latest.revision !== groupsRevision) {
-    synchronizeEdit(latest);
+  if (!latest.storageError && storedGroupsChanged(latest)) {
     applyStoredGroups(latest);
     renderPriceList();
     showPriceStatus('检测到其他标签页的新修改，已保留最新数据；请重试刚才的操作。');
@@ -589,9 +597,15 @@ async function addItemToGroup(groupId, formData) {
 }
 
 async function deleteItemFromGroup(groupId, itemId) {
+  const item = findStoredItem({ groups }, groupId, itemId);
+  if (!item) return;
+  const expectedItem = { ...item };
   const saved = await mutateGroups(() => {
+    if (hasEditConflict(expectedItem, findStoredItem({ groups }, groupId, itemId))) {
+      showPriceStatus('该商品在删除前已发生变化，未执行删除；请检查后重试。');
+      return false;
+    }
     const group = groups.find(g => g.id === groupId);
-    if (!group || !group.items.some(i => i.id === itemId)) return false;
     group.items = group.items.filter(i => i.id !== itemId);
   });
   if (!saved) { renderPriceList(); return; }
@@ -658,10 +672,11 @@ async function saveEditItem(form, groupId, itemId) {
   const saved = await withPriceStorageLock(async () => {
     const latest = readStoredGroups();
     if (!latest.storageError && hasEditConflict(baseItem, findStoredItem(latest, groupId, itemId))) {
+      // Applying the snapshot closes only stale edits. The user may already
+      // have reopened this item against the latest version while we waited.
       applyStoredGroups(latest);
-      clearEditingIfMatches(groupId, itemId);
       renderPriceList();
-      showPriceStatus('该商品已发生变化，已保留最新数据；请重新编辑。');
+      showPriceStatus('该商品已发生变化，已保留最新数据；本次过期修改未保存。');
       if (editingId === null) focusItemAction(groupId, itemId);
       return false;
     }
@@ -854,7 +869,6 @@ function initPriceCalculator() {
       })
       .map(g => g.id));
     // Other items may change while this item's draft remains valid.
-    synchronizeEdit(stored);
     applyStoredGroups(stored);
     if (previousGroups.some(p => !stored.groups.some(g => g.id === p.id))) {
       renderPriceList();

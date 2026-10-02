@@ -174,3 +174,27 @@ test('last-moment unrelated storage changes preserve the current edit for retry'
   assert.equal(tab.run('editingId'), 'i');
   assert.equal(tab.run('groups.length'), 2);
 });
+
+test('a restarted revision sequence cannot overwrite a different stored snapshot', async () => {
+  const storage = new Map([['toolbox_price_groups', JSON.stringify({ v: 1, revision: 1, groups: [group] })]]);
+  const tab = runtime(storage, serialLocks());
+  tab.run('renderPriceList = () => {}; loadGroups()');
+  // Another tab clears storage and creates its first group before this tab's
+  // queued storage events are delivered. The revision is 1 again.
+  const replacement = { id: 'new', name: '清空后创建', items: [] };
+  storage.set('toolbox_price_groups', JSON.stringify({ v: 1, revision: 1, groups: [replacement] }));
+  assert.equal(await tab.run('addGroup("本页新组")'), true);
+  const saved = JSON.parse(storage.get('toolbox_price_groups'));
+  assert.deepEqual(saved.groups.map(g => g.name), ['清空后创建', '本页新组']);
+});
+
+test('save preflight detects changed contents even when the revision is reused', () => {
+  const storage = new Map([['toolbox_price_groups', JSON.stringify({ v: 1, revision: 1, groups: [group] })]]);
+  const tab = runtime(storage, serialLocks());
+  tab.run('renderPriceList = () => {}; loadGroups(); groups[0].name = "待保存"');
+  const latest = JSON.stringify({ v: 1, revision: 1, groups: [{ ...group, name: '重建后的数据' }] });
+  storage.set('toolbox_price_groups', latest);
+  assert.equal(tab.run('saveGroups()'), false);
+  assert.equal(storage.get('toolbox_price_groups'), latest);
+  assert.equal(tab.run('groups[0].name'), '重建后的数据');
+});
