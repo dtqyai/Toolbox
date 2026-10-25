@@ -584,3 +584,22 @@ button { cursor: pointer; background: none; border: none; }
   html { scroll-behavior: auto; }
   .tool-page.active, .boss-flash, .boss-card.boss-spawned { animation: none; }
 }
+
+/* Persistent failures stay beside the operation; only page-level notices float. */
+.operation-status { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-error); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-error); font-size: var(--text-sm); }
+.operation-status[hidden] { display: none; }
+.operation-status p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.operation-status .btn-ghost { flex-shrink: 0; padding: var(--space-1) var(--space-2); }
+.create-group-form .operation-status { flex-basis: 100%; }
+.item-edit-form .operation-status { grid-column: 1 / -1; }
+.price-status-banner[data-kind="info"] { color: var(--color-text-muted); border-color: var(--color-border); }
+.price-status-banner { flex-wrap: wrap; position: sticky; top: 64px; z-index: 101; box-shadow: var(--shadow-md); margin-bottom: var(--space-4); }
+.conflict-heading { font-size: var(--text-lg); margin-bottom: var(--space-3); }
+.conflict-draft { margin-bottom: var(--space-4); border-color: var(--color-error); }
+.conflict-draft h3 { font-size: var(--text-base); overflow-wrap: anywhere; }
+.conflict-message { color: var(--color-text-muted); font-size: var(--text-sm); margin: var(--space-2) 0; }
+.conflict-text { resize: vertical; font-size: 1rem; }
+.conflict-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.draft-copy-status { color: var(--color-text-muted); font-size: var(--text-sm); }
+.draft-copy-status:empty { display: none; }
+@media (max-width: 639px) { .price-status-banner { top: 112px; } }

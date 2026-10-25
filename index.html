@@ -75,7 +75,11 @@
       <div class="price-card">
         <h1 class="page-title">商品单价对比</h1>
         <p class="page-subtitle">创建对比组，组内商品独立比较，组间互不影响</p>
-        <p id="price-storage-status" class="page-subtitle" role="status" hidden></p>
+        <div id="price-status-banner" class="operation-status price-status-banner" hidden>
+          <p id="price-storage-status" role="status" hidden></p>
+          <button id="view-conflict-drafts" type="button" class="btn-ghost" hidden>查看草稿</button>
+          <button id="dismiss-price-status" type="button" class="btn-ghost" data-dismiss-key="page">关闭提示</button>
+        </div>
 
         <!-- Create group -->
         <div class="card create-group-card">
@@ -83,8 +87,14 @@
           <form id="create-group-form" class="create-group-form" novalidate>
             <input id="new-group-name" class="input" type="text" placeholder="如：薯片对比、洗衣液对比" required aria-label="组名称">
             <button type="submit" class="btn-primary">创建组</button>
+            <div class="operation-status" hidden>
+              <p data-status-key="create-group-form" role="status"></p>
+              <button type="button" class="btn-ghost" data-dismiss-key="create-group-form">关闭提示</button>
+            </div>
           </form>
         </div>
+
+        <section id="price-conflicts" aria-label="冲突草稿" hidden></section>
 
         <!-- Group list -->
         <div id="price-list"></div>
@@ -156,6 +166,9 @@
 
   <script src="data.js" defer></script>
   <script src="price-view.js" defer></script>
+  <script src="storage.js" defer></script>
+  <script src="counter.js" defer></script>
+  <script src="boss-timer.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

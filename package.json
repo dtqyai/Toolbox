@@ -2,7 +2,7 @@
   "name": "toolbox",
   "private": true,
   "scripts": {
-    "test": "node --check app.js && node --check data.js && node --check price-view.js && node --test tests/*.test.js",
+    "test": "node --check app.js && node --check data.js && node --check price-view.js && node --check storage.js && node --check counter.js && node --check boss-timer.js && node --test tests/*.test.js",
     "test:browser": "node --test tests/browser/*.test.cjs",
     "test:deploy": "node --test tests/deployment/*.test.cjs"
   },

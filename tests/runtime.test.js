@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const sources = ['data.js', 'price-view.js', 'app.js']
+const sources = ['data.js', 'price-view.js', 'storage.js', 'counter.js', 'boss-timer.js', 'app.js']
   .map(file => fs.readFileSync(require.resolve('../' + file), 'utf8'));
 function runtime(storage = new Map(), locks) {
   const listeners = {};
@@ -52,11 +52,11 @@ test('counter reads and writes under the shared lock across tabs', async () => {
   const storage = new Map([['toolbox_counter', '0']]);
   const locks = serialLocks();
   const a = runtime(storage, locks), b = runtime(storage, locks);
-  a.run('loadCounter()'); b.run('loadCounter()');
-  await Promise.all([a.run('updateCounter(1)'), b.run('updateCounter(1)')]);
+  a.run('ToolboxCounter.loadCounter()'); b.run('ToolboxCounter.loadCounter()');
+  await Promise.all([a.run('ToolboxCounter.updateCounter(1)'), b.run('ToolboxCounter.updateCounter(1)')]);
   assert.equal(storage.get('toolbox_counter'), '2');
-  await a.run('resetCounter()');
-  await b.run('updateCounter(1)');
+  await a.run('ToolboxCounter.resetCounter()');
+  await b.run('ToolboxCounter.updateCounter(1)');
   assert.equal(storage.get('toolbox_counter'), '1');
 });
 
@@ -114,19 +114,19 @@ test('price mutations merge latest storage and roll back failed saves', async ()
 test('counter fallback refuses multiple tabs and succeeds once the other closes', async () => {
   const storage = new Map([['toolbox_counter', '5']]);
   const a = runtime(storage), b = runtime(storage);
-  a.run('initPricePresence(); loadCounter()'); b.run('initPricePresence(); loadCounter()');
-  assert.equal(await a.run('updateCounter(1)'), false);
+  a.run('ToolboxStorage.publishPresence(); ToolboxCounter.loadCounter()'); b.run('ToolboxStorage.publishPresence(); ToolboxCounter.loadCounter()');
+  assert.equal(await a.run('ToolboxCounter.updateCounter(1)'), false);
   assert.equal(storage.get('toolbox_counter'), '5');
-  b.run('stopPriceHeartbeat()');
-  assert.equal(await a.run('updateCounter(1)'), true);
+  b.run('ToolboxStorage.stopPresence()');
+  assert.equal(await a.run('ToolboxCounter.updateCounter(1)'), true);
   assert.equal(storage.get('toolbox_counter'), '6');
 });
 
 test('counter storage failure leaves both display and saved count unchanged', async () => {
   const storage = new Map([['toolbox_counter', '3']]);
   const tab = runtime(storage, serialLocks());
-  tab.run('loadCounter(); localStorage.setItem = () => { throw new Error("quota"); }');
-  assert.equal(await tab.run('updateCounter(1)'), false);
+  tab.run('ToolboxCounter.loadCounter(); localStorage.setItem = () => { throw new Error("quota"); }');
+  assert.equal(await tab.run('ToolboxCounter.updateCounter(1)'), false);
   assert.equal(storage.get('toolbox_counter'), '3');
   assert.equal(String(tab.document.getElementById('counter-value').textContent), '3');
   assert.match(tab.document.getElementById('counter-storage-status').textContent, /无法保存/);
@@ -135,7 +135,7 @@ test('counter storage failure leaves both display and saved count unchanged', as
 test('counter refuses unsafe integer overflow', async () => {
   const storage = new Map([['toolbox_counter', String(Number.MAX_SAFE_INTEGER)]]);
   const tab = runtime(storage, serialLocks());
-  assert.equal(await tab.run('updateCounter(1)'), false);
+  assert.equal(await tab.run('ToolboxCounter.updateCounter(1)'), false);
   assert.equal(storage.get('toolbox_counter'), String(Number.MAX_SAFE_INTEGER));
 });
 
@@ -151,6 +151,7 @@ test('stale price edit cannot overwrite a newer persisted item', async () => {
   assert.equal(storage.get('toolbox_price_groups'), latest);
   assert.equal(tab.run('groups[0].items[0].name'), '其他标签修改');
   assert.equal(tab.run('editingId'), null);
+  assert.equal(tab.run('Array.from(conflictDrafts.values())[0].fields.name'), '过期修改');
 });
 
 test('failed price edit retains its editing session for retry', async () => {
@@ -197,4 +198,40 @@ test('save preflight detects changed contents even when the revision is reused',
   assert.equal(tab.run('saveGroups()'), false);
   assert.equal(storage.get('toolbox_price_groups'), latest);
   assert.equal(tab.run('groups[0].name'), '重建后的数据');
+});
+
+for (const synchronous of [false, true]) {
+  test(`rejected price lock (${synchronous ? 'sync' : 'async'}) keeps input and restores submission controls`, async () => {
+    const saved = JSON.stringify({ v: 1, revision: 1, groups: [group] });
+    const storage = new Map([['toolbox_price_groups', saved]]);
+    const locks = { request() {
+      if (synchronous) throw new Error('lock denied');
+      return Promise.reject(new Error('lock denied'));
+    } };
+    const tab = runtime(storage, locks);
+    tab.run('loadGroups()');
+    const button = { disabled: false };
+    const attributes = new Map();
+    tab.context.form = {
+      id: 'create-group-form',
+      querySelectorAll: () => [button],
+      setAttribute: (key, value) => attributes.set(key, value),
+      removeAttribute: key => attributes.delete(key),
+    };
+    assert.equal(await tab.run('runFormSubmissionOnce(form, () => addGroup("保留组名"))'), false);
+    assert.equal(button.disabled, false);
+    assert.equal(attributes.has('aria-busy'), false);
+    assert.equal(storage.get('toolbox_price_groups'), saved);
+    assert.match(tab.document.getElementById('price-storage-status').textContent, /暂时无法保存/);
+    assert.equal(tab.document.getElementById('price-storage-status').hidden, false);
+  });
+}
+
+test('fallback refuses a write when presence storage cannot be checked', async () => {
+  const storage = new Map([['toolbox_counter', '3']]);
+  const tab = runtime(storage);
+  tab.run('localStorage.key = () => { throw new Error("blocked"); }');
+  assert.equal(await tab.run('ToolboxCounter.updateCounter(1)'), false);
+  assert.equal(storage.get('toolbox_counter'), '3');
+  assert.match(tab.document.getElementById('counter-storage-status').textContent, /无法检查/);
 });

@@ -9,15 +9,14 @@ const {
   fmtCountdown,
   getNext,
   hasEditConflict,
-  hasFreshPricePresence,
   hasGroupSnapshotConflict,
   parseNonNegativeFiniteNumber,
   parsePositiveFiniteNumber,
   parsePositiveInteger,
   runFormSubmissionOnce,
-  runWithPriceStorageLock,
   shouldHandleCounterShortcut,
 } = require('../app.js');
+const { runWithLock, hasFreshPresence } = require('../storage.js');
 
 test('energy input accepts only a complete finite non-negative number', () => {
   assert.equal(parseNonNegativeFiniteNumber('12.5'), 12.5);
@@ -86,14 +85,14 @@ test('price writes use the shared cross-tab lock when available', async () => {
       return task();
     },
   };
-  const result = await runWithPriceStorageLock(lockManager, async () => 'saved');
+  const result = await runWithLock(lockManager, 'toolbox-price-groups-write', async () => 'saved');
   assert.equal(result, 'saved');
   assert.deepEqual(calls, ['toolbox-price-groups-write']);
 });
 
 test('price writes use the supplied safe fallback without Web Locks', async () => {
   const calls = [];
-  const result = await runWithPriceStorageLock(null, async () => 'saved', async task => {
+  const result = await runWithLock(null, 'toolbox-price-groups-write', async () => 'saved', async task => {
     calls.push('fallback');
     return task();
   });
@@ -103,15 +102,15 @@ test('price writes use the supplied safe fallback without Web Locks', async () =
 
 test('fallback presence detects another live tab and ignores stale or own entries', () => {
   const now = 10_000;
-  assert.equal(hasFreshPricePresence([
+  assert.equal(hasFreshPresence([
     ['toolbox_price_tab_self', '9000'],
     ['toolbox_price_tab_other', '8000'],
   ], 'toolbox_price_tab_self', now), true);
-  assert.equal(hasFreshPricePresence([
+  assert.equal(hasFreshPresence([
     ['toolbox_price_tab_self', '9000'],
     ['toolbox_price_tab_stale', '1000'],
   ], 'toolbox_price_tab_self', now), false);
-  assert.equal(hasFreshPricePresence([
+  assert.equal(hasFreshPresence([
     ['toolbox_price_tab_future', '11000'],
   ], 'toolbox_price_tab_self', now), false);
 });
@@ -217,4 +216,18 @@ test('stored items with overflowing derived prices are rejected without losing v
   ] }] }));
   assert.equal(result.hadInvalidData, true);
   assert.deepEqual(result.groups[0].items, [base]);
+});
+
+
+test('price summary compares different pack sizes using prices per 100g', () => {
+  const { renderGroupContent } = require('../price-view.js');
+  const group = { id: 'g', name: '食品', items: [
+    { id: 'a', name: '小包装', unitWeight: 100, packSize: 1, packCount: 1, totalPrice: 10 },
+    { id: 'b', name: '大包装', unitWeight: 1000, packSize: 1, packCount: 1, totalPrice: 20 },
+  ] };
+  const { summaryHtml } = renderGroupContent(group);
+  assert.match(summaryHtml, /每 100g：¥2\.00～¥10\.00/);
+  assert.match(summaryHtml, /最低单价低 80\.0%/);
+  assert.doesNotMatch(renderGroupContent({ ...group, items: [group.items[0]] }).summaryHtml, /最低单价低|0\.0%/);
+  assert.doesNotMatch(renderGroupContent({ ...group, items: [group.items[0], { ...group.items[0], id: 'c' }] }).summaryHtml, /最低单价低/);
 });

@@ -56,6 +56,7 @@ const PriceView = (() => {
                   <label for="edit-${group.id}-${item.id}-totalPrice">总价（元）</label>
                   <input id="edit-${group.id}-${item.id}-totalPrice" class="input" type="number" min="0" step="any" data-field="totalPrice" value="${item.totalPrice}" required aria-label="总价，单位元">
                 </div>
+                ${operationStatus(group.id + ':edit:' + item.id)}
                 <div class="item-edit-actions">
                   <button type="button" class="btn-ghost" data-action="cancel-edit" data-group-id="${group.id}" data-item-id="${item.id}">取消</button>
                   <button type="submit" class="btn-primary">保存</button>
@@ -83,16 +84,14 @@ const PriceView = (() => {
 
     const summaryHtml = group.items.length > 0 ? (() => {
       const priced = unitPrices.filter(w => w.up !== null && w.up > 0);
-      const prices = group.items.map(i => i.totalPrice);
       const cheapestPrice = priced.length > 0 ? Math.min(...priced.map(w => w.up)) : null;
       const maxPrice = priced.length > 0 ? Math.max(...priced.map(w => w.up)) : null;
-      let percentStr = '--';
-      if (cheapestPrice !== null && maxPrice !== null && maxPrice > 0) {
-        percentStr = ((maxPrice - cheapestPrice) / maxPrice * 100).toFixed(1) + '%';
-      }
-      return '<div class="group-summary">共 ' + group.items.length + ' 件商品 · 价格区间 ¥' +
-        Math.min(...prices).toFixed(2) + ' ~ ¥' + Math.max(...prices).toFixed(2) +
-        ' · 最划算比最贵便宜 ' + percentStr + '</div>';
+      if (cheapestPrice === null) return '';
+      const range = cheapestPrice === maxPrice ? '¥' + (cheapestPrice * 100).toFixed(2)
+        : '¥' + (cheapestPrice * 100).toFixed(2) + '～¥' + (maxPrice * 100).toFixed(2);
+      const percent = ((maxPrice - cheapestPrice) / maxPrice * 100).toFixed(1);
+      const saving = priced.length > 1 && Number(percent) > 0 ? ' · 最低单价低 ' + percent + '%' : '';
+      return '<div class="group-summary">共 ' + group.items.length + ' 件商品 · 每 100g：' + range + saving + '</div>';
     })() : '';
 
     return { summaryHtml, itemsHtml };
@@ -105,6 +104,7 @@ const PriceView = (() => {
           <h2 class="group-name">${escHtml(group.name) || '未命名组'}</h2>
           <button class="btn-ghost btn-delete" data-action="delete-group" data-group-id="${group.id}" aria-label="删除组">删除组</button>
         </div>
+        ${operationStatus(group.id + ':group')}
         ${summaryHtml}
         <div class="group-items">${itemsHtml}</div>
         <div class="group-add-form">
@@ -133,12 +133,40 @@ const PriceView = (() => {
               </div>
               <button type="submit" class="btn-primary">添加商品</button>
             </div>
+            ${operationStatus(group.id + ':add')}
           </form>
         </div>
       </div>`;
   }
 
-  return { renderGroupContent, renderGroupCard };
+  function operationStatus(key) {
+    return `<div class="operation-status" hidden>
+      <p data-status-key="${escHtml(key)}" role="status"></p>
+      <button type="button" class="btn-ghost" data-dismiss-key="${escHtml(key)}">关闭提示</button>
+    </div>`;
+  }
+
+  function renderConflictDrafts(drafts) {
+    if (!drafts.length) return '';
+    return '<h2 class="conflict-heading">冲突草稿</h2>' + drafts.map(draft => {
+      const fields = draft.fields;
+      const text = '商品名称：' + fields.name + '\n单件重量（g）：' + fields.unitWeight +
+        '\n每套件数：' + fields.packSize + '\n购买套数：' + fields.packCount + '\n总价（元）：' + fields.totalPrice;
+      return `<article class="card conflict-draft" data-draft-id="${draft.id}">
+        <h3>${escHtml(draft.groupName)} · ${escHtml(fields.name) || '未命名商品'}</h3>
+        <p class="conflict-message">${draft.hasLatest ? '商品已更新，未保存的输入已保留。可编辑最新版后重新填写。刷新前请复制需要的草稿。' : '商品或对比组已删除，未保存的输入已保留。刷新前请复制需要的草稿。'}</p>
+        <textarea id="conflict-text-${draft.id}" class="input conflict-text" readonly rows="5" aria-label="冲突草稿内容">${escHtml(text)}</textarea>
+        <div class="conflict-actions">
+          <button type="button" class="btn-ghost" data-conflict-action="copy" data-draft-id="${draft.id}">复制草稿</button>
+          ${draft.hasLatest ? `<button type="button" class="btn-ghost" data-conflict-action="edit" data-draft-id="${draft.id}">编辑最新版</button>` : ''}
+          <button type="button" class="btn-ghost" data-conflict-action="discard" data-draft-id="${draft.id}">放弃草稿</button>
+        </div>
+        <p id="conflict-status-${draft.id}" class="draft-copy-status" role="status"></p>
+      </article>`;
+    }).join('');
+  }
+
+  return { renderGroupContent, renderGroupCard, renderConflictDrafts };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = PriceView;

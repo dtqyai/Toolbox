@@ -9,16 +9,16 @@ const {
 const priceView = typeof module !== 'undefined' && module.exports
   ? require('./price-view.js') : PriceView;
 
+const storage = typeof module !== 'undefined' && module.exports
+  ? require('./storage.js') : ToolboxStorage;
+const { initCounter, shouldHandleCounterShortcut } = typeof module !== 'undefined' && module.exports
+  ? require('./counter.js') : ToolboxCounter;
+const { initBossTimer, getNext, fmtCountdown } = typeof module !== 'undefined' && module.exports
+  ? require('./boss-timer.js') : BossTimer;
+
 /* ===== TAB NAVIGATION ===== */
 const TAB_IDS = ['energy', 'counter', 'price', 'timer'];
 const ACTIVE_TAB_KEY = 'toolbox_active_tab';
-
-// Modified keys belong to the browser and OS (Cmd/Ctrl+R reload, Ctrl+'+'
-// zoom): claiming them would break those shortcuts and silently reset or
-// advance the counter.
-function shouldHandleCounterShortcut(counterActive, isTextEntry, isTabControl, hasModifier) {
-  return counterActive && !isTextEntry && !isTabControl && !hasModifier;
-}
 
 // Roving tabindex: only the active tab is in the tab order (tabindex="0"),
 // the rest are tabindex="-1" but still reachable via arrow keys.
@@ -147,131 +147,10 @@ function initEnergyConverter() {
   bind(inputKcal, inputKj, convertKcalToKj);
 }
 
-/* ===== COUNTER ===== */
-// A long-press auto-repeat feature (hold +/− to count fast) existed briefly
-// and was deliberately removed in favour of plain taps and keyboard
-// shortcuts. Do not re-add it.
-const COUNTER_KEY = 'toolbox_counter';
-let counterState = { value: 0 };
-
-function renderCounterValue(value) {
-  const display = document.getElementById('counter-value');
-  display.textContent = value;
-  display.classList?.toggle('counter-long', String(value).length > 8);
-}
-
-function loadCounter() {
-  try {
-    const storedValue = Number(localStorage.getItem(COUNTER_KEY));
-    counterState.value = Number.isSafeInteger(storedValue) ? storedValue : 0;
-  } catch (e) {}
-  renderCounterValue(counterState.value);
-}
-
-function showCounterStatus(message) {
-  const status = document.getElementById('counter-storage-status');
-  if (status) { status.textContent = message; status.hidden = !message; }
-}
-
-async function changeCounter(nextValue) {
-  const task = () => {
-    try {
-      // Read inside the lock: another tab may have changed the stored count.
-      const stored = Number(localStorage.getItem(COUNTER_KEY));
-      const current = Number.isSafeInteger(stored) ? stored : 0;
-      const value = nextValue(current);
-      if (!Number.isSafeInteger(value)) {
-        showCounterStatus('已达到计数范围上限。');
-        return false;
-      }
-      localStorage.setItem(COUNTER_KEY, String(value));
-      counterState.value = value;
-      renderCounterValue(value);
-      showCounterStatus('');
-      return true;
-    } catch (e) {
-      showCounterStatus('无法保存到浏览器，本次计数未保留。');
-      return false;
-    }
-  };
-  try {
-    const locks = typeof navigator !== 'undefined' ? navigator.locks : null;
-    if (locks && typeof locks.request === 'function') {
-      return await locks.request('toolbox-counter-write', task);
-    }
-    // Reuse the toolbox presence guard on browsers without Web Locks.
-    await new Promise(resolve => setTimeout(resolve, 100));
-    if (hasAnotherPriceTab()) {
-      showCounterStatus('当前浏览器不支持跨标签写入锁；请关闭其他工具箱标签页后重试。');
-      return false;
-    }
-    return task();
-  } catch (e) {
-    showCounterStatus('无法取得写入锁，请重试。');
-    return false;
-  }
-}
-
-function updateCounter(delta) {
-  return changeCounter(value => value + delta);
-}
-
-function resetCounter() {
-  return changeCounter(() => 0);
-}
-
-function initCounter() {
-  loadCounter();
-  window.addEventListener('storage', e => {
-    if (e.key === COUNTER_KEY || e.key === null) loadCounter();
-  });
-  document.getElementById('btn-plus').addEventListener('click', () => updateCounter(1));
-  document.getElementById('btn-minus').addEventListener('click', () => updateCounter(-1));
-  document.getElementById('btn-reset').addEventListener('click', resetCounter);
-
-  document.addEventListener('keydown', function(e) {
-    const counterPage = document.getElementById('page-counter');
-    const counterActive = !!counterPage && counterPage.classList.contains('active');
-    const isTextEntry = !!e.target.closest('input, textarea, select, [contenteditable="true"]');
-    const isTabControl = !!e.target.closest('[role="tab"], [role="tablist"]');
-    const hasModifier = e.metaKey || e.ctrlKey || e.altKey;
-    if (!shouldHandleCounterShortcut(counterActive, isTextEntry, isTabControl, hasModifier)) return;
-    // A focused button only claims Space (it would activate the button *and*
-    // run the shortcut); arrows and R stay live so clicking +/- with the mouse
-    // doesn't kill keyboard control.
-    const onButton = !!e.target.closest('button');
-    switch (e.key) {
-      case '+':
-      case 'ArrowUp':
-        e.preventDefault();
-        updateCounter(1);
-        break;
-      case '-':
-      case 'ArrowDown':
-        e.preventDefault();
-        updateCounter(-1);
-        break;
-      case ' ':
-        if (onButton) return;
-        e.preventDefault();
-        updateCounter(1);
-        break;
-      case 'r':
-      case 'R':
-        e.preventDefault();
-        resetCounter();
-        break;
-    }
-  });
-}
-
 /* ===== PRICE CALCULATOR ===== */
 // Storage is localStorage-only by design: no import/export or remote backup.
 // Every read is decoded at the boundary, and revisions prevent a stale tab
 // from silently replacing a newer snapshot.
-const PRICE_STORAGE_LOCK = 'toolbox-price-groups-write';
-const PRICE_PRESENCE_PREFIX = 'toolbox_price_tab_';
-const PRICE_PRESENCE_TTL_MS = 5000;
 let groups = []; // [{ id, name, items: [...] }]
 let editingId = null;
 let editingGroupId = null;
@@ -279,25 +158,106 @@ let editingBaseItem = null;
 let groupsRevision = 0;
 let persistedGroupsSnapshot = [];
 let priceStatusTimer = null;
-let priceTabId = null;
-let pricePresenceKey = null;
-let pricePresenceTimer = null;
+let priceInfo = '';
+const priceNotices = new Map();
+const conflictDrafts = new Map();
+let pendingConflictFocus = null;
 // Form nodes are replaced by synchronization renders; submissions belong to
 // the group/item, and every replacement must inherit their pending state.
 const pendingPriceForms = new Map();
 
-function showPriceStatus(message) {
+function renderPriceNotices() {
+  const localKeys = new Set();
+  for (const node of document.querySelectorAll?.('[data-status-key]') || []) {
+    const message = priceNotices.get(node.dataset.statusKey) || '';
+    node.textContent = message;
+    node.parentElement.hidden = !message;
+    if (message) localKeys.add(node.dataset.statusKey);
+  }
+  const notices = Array.from(priceNotices.entries());
+  const notice = notices.filter(([key]) => !localKeys.has(key)).at(-1) || notices.at(-1);
   const status = document.getElementById('price-storage-status');
   if (!status) return;
-  clearTimeout(priceStatusTimer);
-  status.textContent = message;
-  status.hidden = !message;
-  if (message) {
-    priceStatusTimer = setTimeout(() => {
-      status.hidden = true;
-      status.textContent = '';
+  status.textContent = notice ? notice[1] : priceInfo;
+  status.hidden = !status.textContent || !!(notice && localKeys.has(notice[0]));
+  const banner = document.getElementById('price-status-banner');
+  if (banner) {
+    banner.hidden = status.hidden;
+    if (banner.dataset) banner.dataset.kind = notice ? 'error' : 'info';
+  }
+  const viewDrafts = document.getElementById('view-conflict-drafts');
+  if (viewDrafts) viewDrafts.hidden = !conflictDrafts.size;
+  const dismiss = document.getElementById('dismiss-price-status');
+  if (dismiss?.dataset) dismiss.dataset.dismissKey = notice ? notice[0] : 'info';
+}
+
+function showPriceStatus(message, { persistent = true, targetKey = 'page' } = {}) {
+  if (persistent) {
+    if (message) priceNotices.set(targetKey, message);
+    else priceNotices.delete(targetKey);
+  } else {
+    clearTimeout(priceStatusTimer);
+    priceInfo = message;
+    if (message) priceStatusTimer = setTimeout(() => {
+      priceInfo = '';
+      renderPriceNotices();
     }, 6000);
   }
+  renderPriceNotices();
+}
+
+function clearPriceStatus(targetKey) {
+  priceNotices.delete(targetKey);
+  renderPriceNotices();
+}
+
+function preserveConflictingEdit(fallbackForm) {
+  const form = document.querySelector('.item-edit-form[data-group-id="' + editingGroupId + '"][data-item-id="' + editingId + '"]') || fallbackForm;
+  const fields = {};
+  for (const field of ['name', 'unitWeight', 'packSize', 'packCount', 'totalPrice']) {
+    fields[field] = form?.querySelector('[data-field="' + field + '"]')?.value ?? String(editingBaseItem?.[field] ?? '');
+  }
+  const id = uid();
+  if (form?.contains?.(document.activeElement)) pendingConflictFocus = id;
+  conflictDrafts.set(id, {
+    id, groupId: editingGroupId, itemId: editingId,
+    groupName: groups.find(g => g.id === editingGroupId)?.name || '未命名组', fields,
+  });
+  showPriceStatus('商品已更新，未保存的输入已保留在冲突草稿中。', { targetKey: 'conflicts' });
+}
+
+function renderConflictDrafts() {
+  const root = document.getElementById('price-conflicts');
+  if (!root) return;
+  const drafts = Array.from(conflictDrafts.values(), draft => ({
+    ...draft, hasLatest: !!findStoredItem({ groups }, draft.groupId, draft.itemId),
+  }));
+  const signature = JSON.stringify(drafts);
+  if (root.dataset?.signature === signature) return;
+  root.innerHTML = priceView.renderConflictDrafts(drafts);
+  root.hidden = drafts.length === 0;
+  if (root.dataset) root.dataset.signature = signature;
+  if (pendingConflictFocus) {
+    document.getElementById('conflict-text-' + pendingConflictFocus)?.focus?.();
+    pendingConflictFocus = null;
+  }
+}
+
+async function copyConflictDraft(id) {
+  const input = document.getElementById('conflict-text-' + id);
+  if (!input) return;
+  let message;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+    await navigator.clipboard.writeText(input.value);
+    message = '已复制草稿。';
+  } catch (error) {
+    input.focus();
+    input.select();
+    message = '草稿已选中，请使用复制操作。';
+  }
+  const status = document.getElementById('conflict-status-' + id);
+  if (status) status.textContent = message;
 }
 
 function readStoredGroups() {
@@ -313,10 +273,10 @@ function readStoredGroups() {
   }
 }
 
-function applyStoredGroups(state) {
+function applyStoredGroups(state, fallbackForm) {
   // Every path adopting a persisted snapshot must reconcile the active edit,
   // including saves/deletes that read it before its storage event arrives.
-  synchronizeEdit(state);
+  synchronizeEdit(state, fallbackForm);
   groups = cloneGroups(state.groups);
   groupsRevision = state.revision;
   persistedGroupsSnapshot = cloneGroups(state.groups);
@@ -329,90 +289,19 @@ function storedGroupsChanged(state) {
     JSON.stringify(state.groups) !== JSON.stringify(persistedGroupsSnapshot);
 }
 
-function runWithPriceStorageLock(lockManager, task, fallback) {
-  if (lockManager && typeof lockManager.request === 'function') {
-    return lockManager.request(PRICE_STORAGE_LOCK, task);
-  }
-  return fallback ? fallback(task) : Promise.resolve().then(task);
-}
-
-// Presence heartbeat for the no-Web-Locks fallback: it is the only signal
-// other fallback tabs use to detect this tab, so it only runs where
-// navigator.locks is missing (everywhere else it would be pure localStorage
-// churn every 2 seconds).
-function initPricePresence() {
-  if (!pricePresenceKey) {
-    priceTabId = uid();
-    pricePresenceKey = PRICE_PRESENCE_PREFIX + priceTabId;
-  }
-  clearInterval(pricePresenceTimer);
-  try { localStorage.setItem(pricePresenceKey, String(Date.now())); } catch (e) {}
-  pricePresenceTimer = setInterval(() => {
-    try { localStorage.setItem(pricePresenceKey, String(Date.now())); } catch (e) {}
-  }, 2000);
-}
-
-function stopPriceHeartbeat() {
-  clearInterval(pricePresenceTimer);
-  pricePresenceTimer = null;
-  if (pricePresenceKey) {
-    try { localStorage.removeItem(pricePresenceKey); } catch (e) {}
-  }
-}
-
-function hasFreshPricePresence(entries, ownKey, now) {
-  return entries.some(([key, value]) => {
-    if (!key.startsWith(PRICE_PRESENCE_PREFIX) || key === ownKey) return false;
-    const timestamp = Number(value);
-    const age = now - timestamp;
-    return Number.isFinite(timestamp) && age >= 0 && age < PRICE_PRESENCE_TTL_MS;
-  });
-}
-
-function hasAnotherPriceTab() {
-  initPricePresence();
+async function withPriceStorageLock(task, targetKey = 'page') {
   try {
-    const now = Date.now();
-    localStorage.setItem(pricePresenceKey, String(now));
-    const entries = [];
-    const invalidPresenceKeys = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key) continue;
-      const value = localStorage.getItem(key);
-      entries.push([key, value]);
-      if (key.startsWith(PRICE_PRESENCE_PREFIX) && key !== pricePresenceKey) {
-        const timestamp = Number(value);
-        const age = now - timestamp;
-        if (!Number.isFinite(timestamp) || age < 0 || age >= PRICE_PRESENCE_TTL_MS) {
-          invalidPresenceKeys.push(key);
-        }
-      }
-    }
-    invalidPresenceKeys.forEach(key => localStorage.removeItem(key));
-    return hasFreshPricePresence(entries, pricePresenceKey, now);
-  } catch (e) {
+    return await storage.requestWrite('toolbox-price-groups-write', task);
+  } catch (error) {
+    const message = error instanceof storage.CoordinationError ? error.message : '暂时无法保存，请重试。';
+    showPriceStatus(message, { targetKey });
     return false;
   }
 }
 
-async function runFallbackPriceWrite(task) {
-  // Give a simultaneously opened tab time to publish its distinct presence key.
-  await new Promise(resolve => setTimeout(resolve, 100));
-  if (hasAnotherPriceTab()) {
-    showPriceStatus('当前浏览器不支持跨标签写入锁；请关闭其他工具箱标签页后重试。');
-    return false;
-  }
-  return task();
-}
-
-function withPriceStorageLock(task) {
-  const lockManager = typeof navigator !== 'undefined' ? navigator.locks : null;
-  return runWithPriceStorageLock(lockManager, task, runFallbackPriceWrite);
-}
-
-function synchronizeEdit(state) {
+function synchronizeEdit(state, fallbackForm) {
   if (editingId !== null && hasEditConflict(editingBaseItem, findStoredItem(state, editingGroupId, editingId))) {
+    preserveConflictingEdit(fallbackForm);
     editingId = null;
     editingGroupId = null;
     editingBaseItem = null;
@@ -457,17 +346,17 @@ function itemFormSnapshot(form) {
     .map(field => form.querySelector('[data-field="' + field + '"]').value));
 }
 
-async function mutateGroups(mutator) {
+async function mutateGroups(mutator, targetKey) {
   return withPriceStorageLock(async () => {
     const latest = readStoredGroups();
     if (!latest.storageError && storedGroupsChanged(latest)) {
       applyStoredGroups(latest);
       renderPriceList();
-      showPriceStatus('已同步其他标签页的修改。');
+      showPriceStatus('已同步其他标签页的修改。', { persistent: false });
     }
     if (mutator() === false) return false;
-    return saveGroups();
-  });
+    return saveGroups(targetKey);
+  }, targetKey);
 }
 
 function setInputError(el, message) {
@@ -495,12 +384,12 @@ function flagInputError(el) {
   el?.focus();
 }
 
-function saveGroups() {
+function saveGroups(targetKey = 'page') {
   const latest = readStoredGroups();
   if (!latest.storageError && storedGroupsChanged(latest)) {
     applyStoredGroups(latest);
     renderPriceList();
-    showPriceStatus('检测到其他标签页的新修改，已保留最新数据；请重试刚才的操作。');
+    showPriceStatus('检测到其他标签页的新修改，已保留最新数据；请重试刚才的操作。', { targetKey });
     return false;
   }
 
@@ -509,11 +398,12 @@ function saveGroups() {
     writePriceGroups(localStorage, nextRevision, groups);
     groupsRevision = nextRevision;
     persistedGroupsSnapshot = cloneGroups(groups);
+    clearPriceStatus(targetKey);
     return true;
   } catch (e) {
     groups = cloneGroups(persistedGroupsSnapshot);
     renderPriceList();
-    showPriceStatus('无法保存到浏览器，本次修改未保留。');
+    showPriceStatus('无法保存到浏览器，本次修改未保留。', { targetKey });
     return false;
   }
 }
@@ -544,7 +434,7 @@ function uid() {
 async function addGroup(name) {
   const saved = await mutateGroups(() => {
     groups.push({ id: uid(), name, items: [] });
-  });
+  }, 'create-group-form');
   if (saved) renderPriceList();
   return saved;
 }
@@ -552,6 +442,9 @@ async function addGroup(name) {
 async function deleteGroup(groupId) {
   const group = groups.find(g => g.id === groupId);
   if (!group) { renderPriceList(); return; }
+  const initiator = document.activeElement;
+  const neighbors = neighboringIds(groups, groupId);
+  const targetKey = groupId + ':group';
   const confirmedSnapshot = cloneGroups([group])[0];
   const itemCount = group.items.length;
   const detail = itemCount > 0 ? `（含 ${itemCount} 件商品）` : '';
@@ -562,19 +455,26 @@ async function deleteGroup(groupId) {
     const latestGroup = groups.find(g => g.id === groupId);
     if (hasGroupSnapshotConflict(confirmedSnapshot, latestGroup)) {
       renderPriceList();
-      showPriceStatus('该对比组在确认期间已发生变化，未执行删除；请检查后重试。');
+      showPriceStatus('该对比组在确认期间已发生变化，未执行删除；请检查后重试。', { targetKey });
       return false;
     }
     groups = groups.filter(g => g.id !== groupId);
-    const saved = saveGroups();
+    const saved = saveGroups(targetKey);
     if (saved && editingGroupId === groupId) {
       editingId = null;
       editingGroupId = null;
       editingBaseItem = null;
     }
     return saved;
-  });
-  if (saved) renderPriceList();
+  }, targetKey);
+  if (saved) {
+    renderPriceList();
+    if (canRestoreActionFocus(initiator)) {
+      const nextId = neighbors.find(id => groups.some(g => g.id === id));
+      const target = nextId && document.querySelector('.group-add-item-form[data-group-id="' + nextId + '"] [data-field="name"]');
+      (target || document.getElementById('new-group-name'))?.focus({ preventScroll: true });
+    }
+  }
 }
 
 async function addItemToGroup(groupId, formData) {
@@ -589,7 +489,7 @@ async function addItemToGroup(groupId, formData) {
       packCount: formData.packCount,
       totalPrice: formData.totalPrice,
     });
-  });
+  }, groupId + ':add');
   if (!saved) { renderPriceList(); return false; }
   const group = groups.find(g => g.id === groupId);
   if (group) renderGroup(group);
@@ -599,19 +499,36 @@ async function addItemToGroup(groupId, formData) {
 async function deleteItemFromGroup(groupId, itemId) {
   const item = findStoredItem({ groups }, groupId, itemId);
   if (!item) return;
+  const initiator = document.activeElement;
+  const neighbors = neighboringIds(groups.find(g => g.id === groupId).items, itemId);
+  const targetKey = groupId + ':group';
   const expectedItem = { ...item };
   const saved = await mutateGroups(() => {
     if (hasEditConflict(expectedItem, findStoredItem({ groups }, groupId, itemId))) {
-      showPriceStatus('该商品在删除前已发生变化，未执行删除；请检查后重试。');
+      showPriceStatus('该商品在删除前已发生变化，未执行删除；请检查后重试。', { targetKey });
       return false;
     }
     const group = groups.find(g => g.id === groupId);
     group.items = group.items.filter(i => i.id !== itemId);
-  });
+  }, targetKey);
   if (!saved) { renderPriceList(); return; }
   clearEditingIfMatches(groupId, itemId);
   const group = groups.find(g => g.id === groupId);
   if (group) renderGroup(group);
+  if (canRestoreActionFocus(initiator)) {
+    const nextId = neighbors.find(id => group?.items.some(item => item.id === id));
+    if (nextId) focusItemAction(groupId, nextId);
+    else document.querySelector('.group-add-item-form[data-group-id="' + groupId + '"] [data-field="name"]')?.focus({ preventScroll: true });
+  }
+}
+
+function neighboringIds(items, id) {
+  const index = items.findIndex(item => item.id === id);
+  return [...items.slice(index + 1), ...items.slice(0, index).reverse()].map(item => item.id);
+}
+
+function canRestoreActionFocus(initiator) {
+  return !document.activeElement || document.activeElement === document.body || document.activeElement === initiator;
 }
 
 function startEditItem(groupId, itemId) {
@@ -669,15 +586,15 @@ async function saveEditItem(form, groupId, itemId) {
   const submittedDraft = itemFormSnapshot(form);
 
   const baseItem = editingBaseItem;
+  const targetKey = groupId + ':edit:' + itemId;
   const saved = await withPriceStorageLock(async () => {
     const latest = readStoredGroups();
     if (!latest.storageError && hasEditConflict(baseItem, findStoredItem(latest, groupId, itemId))) {
       // Applying the snapshot closes only stale edits. The user may already
       // have reopened this item against the latest version while we waited.
-      applyStoredGroups(latest);
+      applyStoredGroups(latest, form);
       renderPriceList();
-      showPriceStatus('该商品已发生变化，已保留最新数据；本次过期修改未保存。');
-      if (editingId === null) focusItemAction(groupId, itemId);
+      showPriceStatus('该商品已发生变化，过期修改未保存。' + (conflictDrafts.size ? '输入已保留在冲突草稿中。' : ''), { targetKey: conflictDrafts.size ? 'conflicts' : 'page' });
       return false;
     }
     if (!latest.storageError) applyStoredGroups(latest);
@@ -689,7 +606,7 @@ async function saveEditItem(form, groupId, itemId) {
     item.packSize = fields.packSize;
     item.packCount = fields.packCount;
     item.totalPrice = fields.totalPrice;
-    const saved = saveGroups();
+    const saved = saveGroups(targetKey);
     if (saved && editingGroupId === groupId && editingId === itemId) {
       const currentForm = document.querySelector('.item-edit-form[data-group-id="' + groupId + '"][data-item-id="' + itemId + '"]');
       if (currentForm && itemFormSnapshot(currentForm) !== submittedDraft) {
@@ -700,7 +617,7 @@ async function saveEditItem(form, groupId, itemId) {
       }
     }
     return saved;
-  });
+  }, targetKey);
   if (!saved) return;
   // The write may have merged changes to any group before its storage event
   // arrives. Refresh that entire snapshot while retaining unrelated drafts.
@@ -765,11 +682,15 @@ function renderGroup(group) {
 
   const itemsDiv = card.querySelector(':scope > .group-items');
   if (itemsDiv) preservePriceDrafts(itemsDiv, () => { itemsDiv.innerHTML = itemsHtml; });
+  renderConflictDrafts();
+  renderPriceNotices();
 }
 
 function renderPriceList() {
   const list = document.getElementById('price-list');
   preservePriceDrafts(list, renderPriceListContent);
+  renderConflictDrafts();
+  renderPriceNotices();
 }
 
 function renderPriceListContent() {
@@ -841,14 +762,6 @@ async function handleAddSubmit(form, groupId) {
 }
 
 function initPriceCalculator() {
-  const lockManager = typeof navigator !== 'undefined' ? navigator.locks : null;
-  if (!lockManager) {
-    initPricePresence();
-    // Release the presence claim while hidden and rebuild it on return, so a
-    // bfcache restore doesn't leave this tab invisible to other fallback tabs.
-    window.addEventListener('pagehide', stopPriceHeartbeat);
-    window.addEventListener('pageshow', initPricePresence);
-  }
   loadGroups();
   renderPriceList();
 
@@ -881,7 +794,36 @@ function initPriceCalculator() {
     }
     showPriceStatus(stored.hadInvalidData
       ? '其他标签页写入的数据格式无效，已安全忽略。'
-      : '已同步其他标签页的修改。');
+      : '已同步其他标签页的修改。', { persistent: stored.hadInvalidData });
+  });
+
+  document.getElementById('page-price').addEventListener('click', async event => {
+    if (event.target.closest('#view-conflict-drafts')) document.querySelector('.conflict-text')?.focus();
+    const dismiss = event.target.closest('[data-dismiss-key]');
+    if (dismiss) {
+      const key = dismiss.dataset.dismissKey;
+      if (key === 'info') priceInfo = '';
+      else priceNotices.delete(key);
+      renderPriceNotices();
+      const form = dismiss.closest('form');
+      (form?.querySelector('button[type="submit"]') || document.getElementById('new-group-name'))?.focus({ preventScroll: true });
+    }
+    const button = event.target.closest('[data-conflict-action]');
+    if (!button) return;
+    const draft = conflictDrafts.get(button.dataset.draftId);
+    if (!draft) return;
+    if (button.dataset.conflictAction === 'copy') await copyConflictDraft(draft.id);
+    if (button.dataset.conflictAction === 'edit') startEditItem(draft.groupId, draft.itemId);
+    if (button.dataset.conflictAction === 'discard') {
+      const drafts = Array.from(conflictDrafts.keys());
+      const index = drafts.indexOf(draft.id);
+      conflictDrafts.delete(draft.id);
+      if (!conflictDrafts.size) clearPriceStatus('conflicts');
+      renderConflictDrafts();
+      renderPriceNotices();
+      const next = drafts.slice(index + 1).concat(drafts.slice(0, index)).find(id => conflictDrafts.has(id));
+      (next ? document.getElementById('conflict-text-' + next) : document.getElementById('new-group-name'))?.focus({ preventScroll: true });
+    }
   });
 
   const list = document.getElementById('price-list');
@@ -939,131 +881,6 @@ function initPriceCalculator() {
   }
 }
 
-/* ===== BOSS TIMER ===== */
-// Pure schedule/format helpers live at module level so Node's test runner
-// can exercise the boundary math directly.
-function pad(n) { return String(n).padStart(2, '0'); }
-
-// Next spawn strictly after `now`: ceil alone returns a boundary that can
-// equal `now`, so the loop advances one extra cycle in that case.
-function getNext(now, baseMs, intervalMs) {
-  const elapsed = now - baseMs;
-  let next = baseMs + Math.ceil(elapsed / intervalMs) * intervalMs;
-  while (next <= now) next += intervalMs;
-  return next;
-}
-
-function fmtCountdown(totalSecs, hasHours) {
-  if (hasHours) {
-    const h = Math.floor(totalSecs / 3600);
-    const m = Math.floor((totalSecs % 3600) / 60);
-    const s = totalSecs % 60;
-    return pad(h) + ':' + pad(m) + ':' + pad(s);
-  }
-  const m = Math.floor(totalSecs / 60);
-  const s = totalSecs % 60;
-  return pad(m) + ':' + pad(s);
-}
-
-function initBossTimer() {
-  const originalTitle = document.title;
-
-  function flash(el) { el.classList.remove('boss-flash'); void el.offsetWidth; el.classList.add('boss-flash'); }
-  function fmtDate(ts) {
-    return new Date(ts).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-    }).replace(/\//g, '-');
-  }
-  function onSpawn(cfg) {
-    // Distinct spawn pulse so a refresh is obvious even without watching the digits.
-    cfg.card.classList.remove('boss-spawned');
-    void cfg.card.offsetWidth;
-    cfg.card.classList.add('boss-spawned');
-  }
-
-  // Base times and intervals are hardcoded on purpose: this timer tracks one
-  // game's fixed spawn schedule. If the schedule ever changes, edit the base
-  // and interval below — a settings UI is deliberately out of scope.
-  const WORLD = {
-    key: 'world', title: '世界首领',
-    base: new Date('2023-10-27T22:00:00+08:00').getTime(),
-    interval: 12600 * 1000,
-    els: { spawn: document.getElementById('w-spawn'), h: document.getElementById('w-h'), m: document.getElementById('w-m'), s: document.getElementById('w-s') },
-    card: document.querySelector('.boss-card.world'),
-    prev: null, next: 0, hasHours: true, notifiedFor: -1,
-  };
-  const NORMAL = {
-    key: 'normal', title: '巢穴首领',
-    base: new Date('2026-03-31T18:45:00+08:00').getTime(),
-    interval: 2700 * 1000,
-    els: { spawn: document.getElementById('n-spawn'), m: document.getElementById('n-m'), s: document.getElementById('n-s') },
-    card: document.querySelector('.boss-card.normal'),
-    prev: null, next: 0, hasHours: false, notifiedFor: -1,
-  };
-
-  function updateCard(cfg) {
-    const now = Date.now();
-    cfg.next = getNext(now, cfg.base, cfg.interval);
-    // Detect a rollover into the next cycle → fire spawn effects once.
-    if (cfg.notifiedFor !== -1 && now >= cfg.notifiedFor && cfg.next > cfg.notifiedFor) onSpawn(cfg);
-    cfg.notifiedFor = cfg.next;
-
-    cfg.els.spawn.textContent = fmtDate(cfg.next);
-    const remaining = Math.max(0, cfg.next - now);
-    const totalSecs = Math.floor(remaining / 1000);
-    const h = Math.floor(totalSecs / 3600);
-    const m = Math.floor((totalSecs % 3600) / 60);
-    const s = totalSecs % 60;
-    if (cfg.hasHours) {
-      if (!cfg.prev || h !== cfg.prev.h) { cfg.els.h.textContent = pad(h); if (cfg.prev) flash(cfg.els.h); }
-      if (!cfg.prev || m !== cfg.prev.m) { cfg.els.m.textContent = pad(m); if (cfg.prev) flash(cfg.els.m); }
-      if (!cfg.prev || s !== cfg.prev.s) { cfg.els.s.textContent = pad(s); if (cfg.prev) flash(cfg.els.s); }
-      cfg.prev = { h, m, s };
-    } else {
-      const totalM = Math.floor(totalSecs / 60);
-      if (!cfg.prev || totalM !== cfg.prev.m) { cfg.els.m.textContent = pad(totalM); if (cfg.prev) flash(cfg.els.m); }
-      if (!cfg.prev || s !== cfg.prev.s) { cfg.els.s.textContent = pad(s); if (cfg.prev) flash(cfg.els.s); }
-      cfg.prev = { m: totalM, s };
-    }
-
-    // Urgency highlight in the final minute before a spawn.
-    if (totalSecs > 0 && totalSecs <= 60) cfg.card.classList.add('boss-soon');
-    else cfg.card.classList.remove('boss-soon');
-
-    return totalSecs;
-  }
-
-  const TICK_MS_VISIBLE = 1000;
-  const TICK_MS_HIDDEN = 5000;
-
-  function tick() {
-    const ws = updateCard(WORLD);
-    const ns = updateCard(NORMAL);
-    // Show a countdown in the tab title while the page is in the background.
-    if (document.hidden) {
-      document.title = '巢穴 ' + fmtCountdown(ns, false) + ' · 世界 ' + fmtCountdown(ws, true) + ' — ' + originalTitle;
-    } else if (document.title !== originalTitle) {
-      document.title = originalTitle;
-    }
-  }
-
-  let timerId = null;
-  function startTimer() {
-    if (timerId) clearInterval(timerId);
-    timerId = setInterval(tick, document.hidden ? TICK_MS_HIDDEN : TICK_MS_VISIBLE);
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && document.title !== originalTitle) document.title = originalTitle;
-    tick();
-    startTimer();
-  });
-
-  tick();
-  startTimer();
-}
-
 /* ===== INIT ===== */
 function initSafely(name, initializer) {
   try {
@@ -1083,6 +900,7 @@ if (typeof document !== 'undefined') {
     });
 
     initSafely('热量换算', initEnergyConverter);
+    initSafely('存储协调', () => storage.init());
     initSafely('计数器', initCounter);
     initSafely('比价计算', initPriceCalculator);
     initSafely('Boss 计时', initBossTimer);
@@ -1098,13 +916,11 @@ if (typeof module !== 'undefined' && module.exports) {
     fmtCountdown,
     getNext,
     hasEditConflict,
-    hasFreshPricePresence,
     hasGroupSnapshotConflict,
     parseNonNegativeFiniteNumber,
     parsePositiveFiniteNumber,
     parsePositiveInteger,
     runFormSubmissionOnce,
-    runWithPriceStorageLock,
     shouldHandleCounterShortcut,
   };
 }
