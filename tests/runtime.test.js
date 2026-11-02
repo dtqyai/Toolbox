@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const sources = ['data.js', 'price-view.js', 'storage.js', 'counter.js', 'boss-timer.js', 'app.js']
+const sources = ['data.js', 'price-view.js', 'storage.js', 'counter.js', 'app.js']
   .map(file => fs.readFileSync(require.resolve('../' + file), 'utf8'));
 function runtime(storage = new Map(), locks) {
   const listeners = {};

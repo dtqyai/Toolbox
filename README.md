@@ -1,19 +1,17 @@
 # Toolbox
 
-一个中文网页工具箱，把热量换算、计数器、商品比价和 Boss 计时放在同一页。用原生 HTML、CSS 和 JavaScript 编写，无需安装依赖或构建，计算与数据保存都在浏览器中完成。
+一个中文网页工具箱，把热量换算、计数器和商品比价放在同一页。用原生 HTML、CSS 和 JavaScript 编写，无需安装依赖或构建，计算与数据保存都在浏览器中完成。
 
-## 四个工具
+## 三个工具
 
 | 工具 | 用法 |
 | --- | --- |
 | 热量换算 | 输入千焦（kJ）或千卡（kcal），另一栏自动换算，结果四舍五入为整数。 |
 | 计数器 | 点击加减或重置，也支持键盘操作。计数自动保存，同一站点的多个标签页会同步。 |
 | 商品比价 | 按品类创建对比组，填写商品重量、件数、套数和总价，突出每 100g 单价，标出组内最划算的商品。 |
-| Boss 计时 | 显示巢穴首领、世界首领的下次刷新时间和倒计时，临近刷新时高亮提醒。 |
 
 比价时，件数指一套中有几件，套数指买了几套。比如每件 100 g、每套 3 件、买 2 套，共花 24 元，总重量就是 600 g，单价为 0.04 元/g，也就是每 100 g 花 4 元。不同规格的同类商品放进同一组即可比较。
 
-Boss 计时按代码中预设的基准时间和周期推算，目前巢穴首领每 45 分钟一轮，世界首领每 3 小时 30 分钟一轮。它不读取游戏服务器状态；游戏日程调整后，需要更新预设。
 
 ## 本地使用
 
@@ -25,7 +23,7 @@ python3 -m http.server 8000
 
 浏览器打开 [本地工具箱](http://127.0.0.1:8000/)。关闭终端中的服务后，再次运行同一条命令即可继续使用。
 
-也可以将 `index.html`、`styles.css`、`data.js`、`price-view.js`、`storage.js`、`counter.js`、`boss-timer.js`、`app.js` 和 `favicon.png` 放到静态网站托管服务上，无需后端。
+也可以将 `index.html`、`styles.css`、`data.js`、`price-view.js`、`storage.js`、`counter.js`、`app.js` 和 `favicon.png` 放到静态网站托管服务上，无需后端。
 
 ### 键盘操作
 
@@ -45,7 +43,7 @@ python3 -m http.server 8000
 
 ## 开发与验证
 
-页面结构在 [index.html](index.html)，样式在 [styles.css](styles.css)。[data.js](data.js) 负责数值校验、比价计算和存储编解码；[price-view.js](price-view.js) 生成比价及冲突草稿模板；[storage.js](storage.js) 统一协调写入锁、标签页存活检测和生命周期；[counter.js](counter.js) 管理计数器；[boss-timer.js](boss-timer.js) 管理 Boss 日程和计时；[app.js](app.js) 负责导航、热量换算及比价交互。脚本按 `index.html` 中的顺序加载，不需要构建。Boss 日程由 `boss-timer.js` 中的 `WORLD` 和 `NORMAL` 配置维护。
+页面结构在 [index.html](index.html)，样式在 [styles.css](styles.css)。[data.js](data.js) 负责数值校验、比价计算和存储编解码；[price-view.js](price-view.js) 生成比价及冲突草稿模板；[storage.js](storage.js) 统一协调写入锁、标签页存活检测和生命周期；[counter.js](counter.js) 管理计数器；[app.js](app.js) 负责导航、热量换算及比价交互。脚本按 `index.html` 中的顺序加载，不需要构建。
 
 比价提交状态按组／商品标识保存，重绘时必须恢复；异步保存使用提交时的完整快照，期间的新输入继续作为草稿保留。合并其他标签页的数据后，画面也必须同步更新。
 
@@ -57,7 +55,7 @@ python3 -m http.server 8000
 npm test
 ```
 
-[tests/app.test.js](tests/app.test.js) 检查换算、输入校验、计时边界等基础逻辑；[tests/runtime.test.js](tests/runtime.test.js) 覆盖跨标签计数、表单草稿恢复、保存失败回滚和编辑冲突。运行时测试使用 DOM 与存储替身；[浏览器测试](tests/browser/ui.test.cjs) 则在真实 Chromium 和 WebKit 中检查编辑、焦点、错误反馈、跨标签同步和响应式布局，也覆盖延迟写锁、重绘期间重复提交、无 Web Locks 的双标签操作，以及时钟回拨。
+[tests/app.test.js](tests/app.test.js) 检查换算、输入校验等基础逻辑；[tests/runtime.test.js](tests/runtime.test.js) 覆盖跨标签计数、表单草稿恢复、保存失败回滚和编辑冲突。运行时测试使用 DOM 与存储替身；[浏览器测试](tests/browser/ui.test.cjs) 则在真实 Chromium 和 WebKit 中检查编辑、焦点、错误反馈、跨标签同步和响应式布局，也覆盖延迟写锁、重绘期间重复提交、无 Web Locks 的双标签操作。
 
 回归测试还覆盖冲突草稿复制与丢弃、写入锁拒绝和恢复、持久错误提示、删除后的键盘焦点、统一单价摘要、版本号重用、排队删除时目标更新、保存／删除时同步其他编辑，以及旧保存回调不能清除基于新版数据的新草稿。
 
@@ -80,4 +78,4 @@ TEST_BROWSER=webkit npm run test:browser
 npm run test:deploy
 ```
 
-它会验证部署预检、网站文件内容，以及依赖、配置和测试文件的 404 响应。部署由 `wrangler.jsonc` 配置，`.assetsignore` 仅允许上述九个网站文件；新增图片、脚本等公开资源时，需要同步更新白名单和部署测试。
+它会验证部署预检、网站文件内容，以及依赖、配置和测试文件的 404 响应。部署由 `wrangler.jsonc` 配置，`.assetsignore` 仅允许上述八个网站文件；新增图片、脚本等公开资源时，需要同步更新白名单和部署测试。

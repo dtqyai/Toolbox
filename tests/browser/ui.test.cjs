@@ -11,7 +11,7 @@ const fixture = { v: 1, revision: 1, groups: [{ id: 'g', name: '牛奶对比', i
 ] }] };
 before(async () => {
   const root = path.resolve(__dirname, '../..');
-  const files = new Set(['/index.html', '/app.js', '/data.js', '/price-view.js', '/storage.js', '/counter.js', '/boss-timer.js', '/styles.css', '/favicon.png']);
+  const files = new Set(['/index.html', '/app.js', '/data.js', '/price-view.js', '/storage.js', '/counter.js', '/styles.css', '/favicon.png']);
   server = http.createServer((req, res) => {
     const file = new URL(req.url, 'http://localhost').pathname.replace(/^\/$/, '/index.html');
     if (!files.has(file)) { res.writeHead(404); res.end(); return; }
@@ -105,7 +105,7 @@ test('energy recalculation removes stale errors on the target field', () => with
 
 for (const width of [320, 375, 640, 768, 1440]) {
   test(`all tools fit a ${width}px viewport`, () => withPage(async page => {
-    for (const tool of ['energy', 'counter', 'price', 'timer']) {
+    for (const tool of ['energy', 'counter', 'price']) {
       await page.locator(`#tab-${tool}`).click();
       const dimensions = await page.evaluate(() => ({ viewport: innerWidth, content: document.documentElement.scrollWidth }));
       assert.ok(dimensions.content <= dimensions.viewport, `${tool}: ${JSON.stringify(dimensions)}`);
@@ -399,26 +399,6 @@ test('no-Web-Locks writes block two active tabs and recover after close', () => 
   await page.waitForFunction(() => document.querySelectorAll('.item-card').length === 3);
   assert.equal(await form.locator('[data-field=name]').inputValue(), '');
 }, 375, { noLocks: true }));
-
-test('boss countdown recomputes after a clock rollback without a false spawn', () => withPage(async page => {
-  // Freeze before initialization so the interval starts on the exact second.
-  // A running mock clock carries navigation/action latency into its phase,
-  // leaving the final tick just before the boundary on slower CI engines.
-  await page.clock.install({ time: new Date('2026-09-22T18:00:00+08:00') });
-  await page.clock.pauseAt(new Date('2026-09-22T18:01:00+08:00'));
-  await page.reload(); await page.locator('#tab-timer').click();
-  assert.equal(await page.evaluate(() => new Date().toISOString()), '2026-09-22T10:01:00.000Z');
-  assert.match(await page.locator('#n-spawn').textContent(), /18:45:00/);
-  await page.clock.setSystemTime(new Date('2026-09-22T17:59:00+08:00'));
-  await page.clock.runFor(1000);
-  assert.match(await page.locator('#n-spawn').textContent(), /18:00:00/);
-  assert.equal(await page.locator('#n-m').textContent(), '00');
-  assert.equal(await page.locator('#n-s').textContent(), '59');
-  assert.equal(await page.locator('.boss-card.normal').evaluate(el => el.classList.contains('boss-spawned')), false);
-  await page.clock.runFor(59000);
-  assert.match(await page.locator('#n-spawn').textContent(), /18:45:00/);
-  assert.equal(await page.locator('.boss-card.normal').evaluate(el => el.classList.contains('boss-spawned')), true);
-}));
 
 test('fallback submission retains its identity and draft through a redraw', () => withPage(async page => {
   const form = page.locator('.group-add-item-form');

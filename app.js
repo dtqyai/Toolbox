@@ -13,11 +13,9 @@ const storage = typeof module !== 'undefined' && module.exports
   ? require('./storage.js') : ToolboxStorage;
 const { initCounter, shouldHandleCounterShortcut } = typeof module !== 'undefined' && module.exports
   ? require('./counter.js') : ToolboxCounter;
-const { initBossTimer, getNext, fmtCountdown } = typeof module !== 'undefined' && module.exports
-  ? require('./boss-timer.js') : BossTimer;
 
 /* ===== TAB NAVIGATION ===== */
-const TAB_IDS = ['energy', 'counter', 'price', 'timer'];
+const TAB_IDS = ['energy', 'counter', 'price'];
 const ACTIVE_TAB_KEY = 'toolbox_active_tab';
 
 // Roving tabindex: only the active tab is in the tab order (tabindex="0"),
@@ -903,7 +901,6 @@ if (typeof document !== 'undefined') {
     initSafely('存储协调', () => storage.init());
     initSafely('计数器', initCounter);
     initSafely('比价计算', initPriceCalculator);
-    initSafely('Boss 计时', initBossTimer);
   });
 }
 
@@ -913,8 +910,6 @@ if (typeof module !== 'undefined' && module.exports) {
     convertKjToKcal,
     decodeStoredGroups,
     findCheapestInGroup,
-    fmtCountdown,
-    getNext,
     hasEditConflict,
     hasGroupSnapshotConflict,
     parseNonNegativeFiniteNumber,
